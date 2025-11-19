@@ -1,0 +1,19 @@
+{
+  "name": "style-tees-ecommerce",
+  "version": "1.0.0",
+  "description": "E-commerce website for t-shirt brand",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": ["ecommerce", "tshirt", "shopping", "store"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.18.2",
+    "sqlite3": "^5.1.6",
+    "uuid": "^9.0.0"
+  }
+}
+
