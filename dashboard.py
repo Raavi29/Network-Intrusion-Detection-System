@@ -9,10 +9,8 @@ import plotly.express as px
 import streamlit as st
 
 EVENT_PATH = Path("artifacts/events.jsonl")
-REFRESH_INTERVAL = 3
 
 
-@st.cache_data(ttl=REFRESH_INTERVAL)
 def load_events(path: Path) -> pd.DataFrame:
     if not path.exists() or path.stat().st_size == 0:
         return pd.DataFrame()
@@ -22,47 +20,65 @@ def load_events(path: Path) -> pd.DataFrame:
             try:
                 records.append(json.loads(line))
             except json.JSONDecodeError:
-                continue
+                continue  # a half-written last line while the pipeline is running
     if not records:
         return pd.DataFrame()
-    return pd.DataFrame(records)
+    df = pd.DataFrame(records)
+    df["time"] = pd.to_datetime(df["timestamp"], unit="s")
+    return df
+
+
+def render_overview(df: pd.DataFrame, window: int) -> None:
+    latest = df.tail(window)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Flows scored", len(latest))
+    col2.metric("Alerts", int((latest["label"] != "benign").sum()))
+    col3.metric("Mean anomaly score", f"{latest['score'].mean():.4f}")
+
+    st.subheader("Anomaly score")
+    fig = px.scatter(
+        latest,
+        x="time",
+        y="score",
+        color="label",
+        color_discrete_map={"benign": "#2a9d8f", "malicious": "#e63946"},
+        title="IsolationForest score per flow (lower = more anomalous)",
+    )
+    st.plotly_chart(fig, width="stretch")
+
+    st.subheader("Alerts")
+    alerts = latest[latest["label"] != "benign"].copy()
+    if alerts.empty:
+        st.success("No alerts in this window.")
+        return
+    flow = pd.json_normalize(alerts["flow"].tolist()).set_index(alerts.index)
+    alerts = alerts.join(flow[["src_ip", "dst_ip", "dst_port", "protocol"]])
+    st.dataframe(
+        alerts[["time", "label", "score", "src_ip", "dst_ip", "dst_port", "protocol"]].sort_values(
+            "time", ascending=False
+        ),
+        width="stretch",
+    )
 
 
 def main() -> None:
-    st.set_page_config(page_title="AI IDS Dashboard", layout="wide")
-    st.title("AI-Powered Intrusion Detection System")
-    st.caption("Live traffic overview, anomaly scores, and alert feed")
+    st.set_page_config(page_title="IDS Dashboard", layout="wide")
+    st.title("Intrusion Detection System")
+    st.caption(f"Reads {EVENT_PATH}. Start the detector with `python app.py --mock` or `--interface`.")
 
-    placeholder = st.empty()
-    while True:
-        df = load_events(EVENT_PATH)
-        with placeholder.container():
-            if df.empty:
-                st.info("Waiting for events... run `python app.py --mock` to generate traffic.")
-            else:
-                render_overview(df)
-        time.sleep(REFRESH_INTERVAL)
+    auto = st.sidebar.checkbox("Auto-refresh every 3 s", value=True, key="auto")
+    window = st.sidebar.slider("Flows to show", 100, 5000, 1000, step=100)
 
-
-def render_overview(df: pd.DataFrame) -> None:
-    latest = df.tail(1000)
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Flows", len(latest))
-    col2.metric("Alerts", int((latest["label"] != "benign").sum()))
-    col3.metric("Avg Anomaly Score", f"{latest['score'].mean():.4f}")
-
-    st.subheader("Anomaly Score Trend")
-    fig = px.line(latest, y="score", title="IsolationForest score (lower = more anomalous)")
-    st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("Alerts")
-    alert_df = latest[latest["label"] != "benign"]
-    if alert_df.empty:
-        st.success("No alerts triggered in this window.")
+    df = load_events(EVENT_PATH)
+    if df.empty:
+        st.info("Waiting for events. Run `python app.py --mock` in another terminal.")
     else:
-        st.dataframe(alert_df[["timestamp", "label", "score", "flow"]].sort_values("timestamp", ascending=False))
+        render_overview(df, window)
+
+    if auto:
+        time.sleep(3)
+        st.rerun()
 
 
 if __name__ == "__main__":
     main()
-

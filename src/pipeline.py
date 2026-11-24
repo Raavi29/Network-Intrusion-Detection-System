@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Callable, Dict
+from typing import Dict
 
 from rich.console import Console
 
@@ -21,7 +21,7 @@ class DetectionPipeline:
         self.feature_engineer = FeatureEngineer(
             flow_timeout_s=self.config.features.flow_timeout_s,
             max_flows=self.config.features.max_flows,
-            emit_after_packets=self.config.features.emit_after_packets,
+            min_packets=self.config.features.min_packets,
         )
         self.model_manager = ModelManager(config.model)
         self.alert_manager = AlertManager(config.alerts)
@@ -39,16 +39,31 @@ class DetectionPipeline:
         console.print("[bold green]Loading anomaly model...[/]")
         self.model_manager.load_or_train()
         console.print("[bold green]Model ready. Starting packet pipeline.[/]")
-        self.packet_source.start(self._handle_packet)
+        self.packet_source.start(self.handle_packet)
+        if self.packet_source.blocking:
+            # A PCAP replay has already delivered every packet: score the flows still open and exit.
+            self.flush()
+            self.packet_source.stop()
+            return
         try:
             while True:
                 time.sleep(1)
+                error = self.packet_source.failure()
+                if error is not None:
+                    self.packet_source.stop()
+                    raise RuntimeError(f"packet capture stopped: {error}") from error
         except KeyboardInterrupt:
             console.print("[yellow]Stopping pipeline[/]")
             self.packet_source.stop()
+            self.flush()
 
-    def _handle_packet(self, packet: PacketObservation) -> None:
-        results = self.feature_engineer.process_packet(packet)
+    def handle_packet(self, packet: PacketObservation) -> None:
+        self._score(self.feature_engineer.process_packet(packet))
+
+    def flush(self) -> None:
+        self._score(self.feature_engineer.flush())
+
+    def _score(self, results) -> None:
         for result in results:
             features = result["features"]
             metadata = result["metadata"]

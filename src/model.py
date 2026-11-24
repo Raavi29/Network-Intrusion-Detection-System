@@ -65,12 +65,13 @@ class ModelManager:
             ]
         )
         self.pipeline.fit(data)
+        self.model_path.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(self.pipeline, self.model_path)
 
     def predict(self, features: Dict[str, float], metadata: Dict[str, float | str]) -> PredictionResult:
         if not self.pipeline:
             raise RuntimeError("Model pipeline is not initialized. Call load_or_train() first.")
-        vector = np.array([[features.get(col, 0.0) for col in FEATURE_COLUMNS]])
+        vector = pd.DataFrame([[features.get(col, 0.0) for col in FEATURE_COLUMNS]], columns=FEATURE_COLUMNS)
         score = float(self.pipeline.decision_function(vector)[0])
         label = "malicious" if score < self.config.anomaly_threshold else "benign"
         return PredictionResult(label=label, score=score, metadata=metadata)

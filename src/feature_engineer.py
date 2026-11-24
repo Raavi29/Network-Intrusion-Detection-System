@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Tuple
 
-from .packet_sniffer import PacketObservation
-
+from .packets import PacketObservation
 
 FlowKey = Tuple[str, str, int, int, str]
+FlowResult = Dict[str, Dict[str, float | str]]
 
 
 @dataclass(slots=True)
@@ -81,47 +81,62 @@ class FlowStats:
 
 
 class FeatureEngineer:
-    def __init__(self, flow_timeout_s: float, max_flows: int, emit_after_packets: int):
+    """Groups packets into one-direction flows and emits one feature vector per finished flow.
+
+    A flow is finished when it sends a FIN or goes quiet for `flow_timeout_s`. Only flows with at
+    least `min_packets` packets are scored, because the model was trained on whole flows and a
+    one or two packet flow carries too little signal to judge.
+    """
+
+    SWEEP_INTERVAL_S = 0.5
+
+    def __init__(self, flow_timeout_s: float, max_flows: int, min_packets: int):
         self.flow_timeout_s = flow_timeout_s
         self.max_flows = max_flows
-        self.emit_after_packets = emit_after_packets
+        self.min_packets = min_packets
         self.flows: Dict[FlowKey, FlowStats] = {}
+        self._last_sweep = float("-inf")
 
-    def process_packet(self, pkt: PacketObservation) -> List[Dict[str, Dict[str, float | str]]]:
+    def process_packet(self, pkt: PacketObservation) -> List[FlowResult]:
+        outputs: List[FlowResult] = []
         key = (pkt.src_ip, pkt.dst_ip, pkt.src_port, pkt.dst_port, pkt.protocol)
         flow = self.flows.get(key)
-        if not flow:
+        if flow is None:
             if len(self.flows) >= self.max_flows:
-                self._cleanup(force=True)
+                outputs.extend(self._evict_oldest())
             flow = FlowStats(key=key, first_seen=pkt.timestamp, last_seen=pkt.timestamp)
             self.flows[key] = flow
         flow.update(pkt)
-        outputs: List[Dict[str, Dict[str, float | str]]] = []
-        if flow.packet_count >= self.emit_after_packets:
-            outputs.append(self._finalize_flow(key))
-        else:
+        if pkt.fin_flag:
+            outputs.extend(self._finish(key))
+        if pkt.timestamp - self._last_sweep >= self.SWEEP_INTERVAL_S:
+            self._last_sweep = pkt.timestamp
             outputs.extend(self._expire_old(pkt.timestamp))
         return outputs
 
-    def _expire_old(self, current_time: float) -> List[Dict[str, Dict[str, float | str]]]:
-        expired: List[Dict[str, Dict[str, float | str]]] = []
+    def flush(self) -> List[FlowResult]:
+        """Finish every open flow, for the end of a PCAP or a shutdown."""
+        outputs: List[FlowResult] = []
+        for key in list(self.flows):
+            outputs.extend(self._finish(key))
+        return outputs
+
+    def _expire_old(self, current_time: float) -> List[FlowResult]:
+        outputs: List[FlowResult] = []
         for key, flow in list(self.flows.items()):
             if current_time - flow.last_seen >= self.flow_timeout_s:
-                expired.append(self._finalize_flow(key))
-        return expired
+                outputs.extend(self._finish(key))
+        return outputs
 
-    def _cleanup(self, force: bool = False) -> None:
-        if not force:
-            return
-        for key in sorted(self.flows.keys(), key=lambda k: self.flows[k].last_seen)[: int(self.max_flows * 0.1) or 1]:
-            self._finalize_flow(key)
+    def _evict_oldest(self) -> List[FlowResult]:
+        oldest = sorted(self.flows, key=lambda k: self.flows[k].last_seen)[: max(int(self.max_flows * 0.1), 1)]
+        outputs: List[FlowResult] = []
+        for key in oldest:
+            outputs.extend(self._finish(key))
+        return outputs
 
-    def _finalize_flow(self, key: FlowKey) -> Dict[str, Dict[str, float | str]]:
+    def _finish(self, key: FlowKey) -> List[FlowResult]:
         flow = self.flows.pop(key, None)
-        if not flow:
-            return {}
-        return {
-            "features": flow.to_feature_vector(),
-            "metadata": flow.to_metadata(),
-        }
-
+        if flow is None or flow.packet_count < self.min_packets:
+            return []
+        return [{"features": flow.to_feature_vector(), "metadata": flow.to_metadata()}]
