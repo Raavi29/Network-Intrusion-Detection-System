@@ -1,85 +1,74 @@
-# AI-Powered Intrusion Detection System (IDS)
+# Network Intrusion Detection System
 
-This project implements a Python-first intrusion detection pipeline that captures live packets, engineers security-focused features, applies machine-learning models, and surfaces real-time alerts through a dashboard and outbound notifiers.
+A Python IDS that groups packets into flows, scores each finished flow with an Isolation Forest, and raises an alert when a flow looks anomalous. It reads live traffic, replays PCAP files, or generates synthetic traffic, and shows the results in a Streamlit dashboard.
 
-## High-Level Architecture
+Status: a working prototype trained on a synthetic baseline. It has not been validated on real network data (see Limitations).
 
-- **Packet Capture**: `scapy`/`pyshark` interfaces sniff raw packets or replay PCAP files for offline testing.
-- **Feature Engineering**: Flow-aware aggregations extract metrics such as duration, packet rate, SYN counts, and payload sizes.
-- **Anomaly Detection**: An `IsolationForest` pipeline (with pluggable models) classifies flows as benign, suspicious, or malicious.
-- **Alerting & Storage**: Alerts stream to the console, optional webhooks, and JSONL artifacts for historical audits.
-- **Dashboard**: A Streamlit interface visualizes traffic rates, alert feed, and model confidence in real time.
+## How it works
 
-## Getting Started
+```
+packet source -> FeatureEngineer -> ModelManager -> EventStore (+ alerts) -> dashboard
+ (scapy / PCAP     (flows, 13        (IsolationForest   artifacts/events.jsonl
+  / mock)           features)         + StandardScaler)
+```
 
-### 1. Requirements
+- A flow is one direction of a 5-tuple (source and destination address and port, protocol).
+- A flow is scored when it sends a FIN or has been quiet for 5 seconds (`IDS_FLOW_TIMEOUT_S`). Flows shorter than 5 packets (`IDS_MIN_PACKETS`) are not scored.
+- The 13 features are packet and byte counts, duration, packet and bit rate, packet length mean and spread, SYN, FIN and ACK ratios, mean inter-arrival time, and TCP/UDP flags.
+- A flow whose Isolation Forest score is below `IDS_ANOMALY_THRESHOLD` (default -0.05) is labelled `malicious`.
 
-- Python 3.10+
-- `pip` or `uv`
-- Packet capture privileges (run as Administrator on Windows or with `sudo` on Linux/macOS)
-
-### 2. Install Dependencies
+## Setup
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate  # Windows
-source .venv/bin/activate  # macOS/Linux
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 3. Run the Detection Pipeline
+Live capture needs root (Linux/macOS) or Administrator (Windows). Using a BPF filter (`--bpf`) also needs libpcap (Npcap on Windows).
+
+## Run
 
 ```bash
-python app.py --interface eth0
+python app.py --mock                      # synthetic traffic, no privileges needed
+python app.py --pcap capture.pcap         # replay a file, then exit
+sudo python app.py --interface eth0       # live capture
+streamlit run dashboard.py                # dashboard, reads artifacts/events.jsonl
 ```
 
-Flags:
+Optional alerts go to Slack or email when the `IDS_SLACK_WEBHOOK` or `IDS_SMTP_*` variables are set (see `src/config.py`).
 
-- `--pcap path/to/file.pcap` – replay traffic instead of sniffing live
-- `--mock` – generate synthetic packets (useful without elevated privileges)
-
-### 4. Launch the Dashboard
+## Tests and evaluation
 
 ```bash
-streamlit run dashboard.py
+python -m pytest                          # 15 tests, about 25 seconds
+python scripts/evaluate.py                # detection rates on synthetic attacks
 ```
 
-The dashboard reads `artifacts/events.jsonl` and refreshes automatically.
+`scripts/evaluate.py` runs 1,000 benign flows and 200 of each attack through the full pipeline (fixed seed 2026):
 
-## Project Structure
+| Traffic | Result |
+|---|---|
+| Benign flows | 2 of 1,000 falsely flagged |
+| SYN flood | 200 of 200 detected |
+| Bulk exfiltration | 200 of 200 detected |
+| UDP flood | 200 of 200 detected |
+| Slow port scan | 0 of 200 detected |
+
+## Limitations
+
+- **Synthetic baseline.** With no `IDS_BASELINE_PATH`, the model trains on generated "normal" traffic. Real traffic looks different: when I captured ordinary TCP traffic on the loopback interface, every flow was flagged. Before trusting alerts, train on a CSV of your own benign flows (same 13 columns as `FEATURE_COLUMNS` in `src/model.py`) and set `IDS_BASELINE_PATH`.
+- **The evaluation is a simulation.** The attacks come from `src/traffic.py`, written by the same author as the model's baseline. The numbers show the pipeline works. They do not predict accuracy on real attacks. A fair test needs a labelled dataset such as CIC-IDS2017 replayed with `--pcap`.
+- **Port scans are missed by design.** Each probe is its own one-packet flow, and flows under 5 packets are not scored. Catching scans needs per-source features (distinct ports contacted per second), which this version does not have. `tests/test_model_detection.py` records this as a known blind spot.
+- Not tested here: capture on Windows and macOS, and the Slack and email alerts against real services.
+
+## Layout
 
 ```
-.
-├── app.py                  # Orchestrates capture → features → model → alerts
-├── dashboard.py            # Streamlit UI for real-time monitoring
-├── requirements.txt        # Python dependencies
-├── src/
-│   ├── config.py           # Dataclasses for tunable settings
-│   ├── packet_sniffer.py   # Scapy/pyshark and mock packet sources
-│   ├── feature_engineer.py # Flow tracking and feature extraction
-│   ├── model.py            # IsolationForest manager + persistence
-│   ├── alerts.py           # Slack/email/console alert dispatching
-│   ├── storage.py          # JSONL event logging utilities
-│   └── pipeline.py         # Detection pipeline glue logic
-├── data/
-│   └── baseline.csv        # (Optional) Seed data for training
-└── artifacts/
-    ├── events.jsonl        # Rolling alert/event log
-    └── model.joblib        # Persisted ML model
+app.py              command-line entry point
+dashboard.py        Streamlit dashboard
+src/                config, packets, packet_sniffer, feature_engineer, model, alerts, storage, pipeline, traffic
+tests/              pytest suite
+scripts/evaluate.py synthetic evaluation
+archive/            an unrelated e-commerce site that was in this repository
 ```
-
-## Customization Ideas
-
-- Swap in supervised models (RandomForest, XGBoost) with labeled traffic.
-- Add signature-based rules for known attack fingerprints.
-- Stream alerts to Slack, Discord, or email via environment variables.
-- Deploy on Raspberry Pi for a low-cost home IDS appliance.
-
-## Status & Next Steps
-
-- [x] Python-based architecture scaffolding
-- [ ] Implement packet capture and feature pipeline
-- [ ] Train and persist anomaly model
-- [ ] Build Streamlit dashboard and alert hooks
-
-Contributions and issue reports are welcome!

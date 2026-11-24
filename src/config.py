@@ -21,7 +21,7 @@ class SnifferConfig:
 class FeatureConfig:
     flow_timeout_s: float = float(os.getenv("IDS_FLOW_TIMEOUT_S", "5"))
     max_flows: int = int(os.getenv("IDS_MAX_FLOWS", "5000"))
-    emit_after_packets: int = int(os.getenv("IDS_MIN_PACKETS", "5"))
+    min_packets: int = int(os.getenv("IDS_MIN_PACKETS", "5"))
 
 
 @dataclass(slots=True)
